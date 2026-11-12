@@ -1,153 +1,184 @@
 module alf_cartridge_top (
-    input  wire        CLK_50MHZ,
+    input  wire        clk_50m,      // PIN_12 (/CLK_50MHZ от GPIO21 Pico)
+    input  wire        mcu_active,   // PIN_35 (/MCU_ACTIVE: 1 = Загрузка/Тест, 0 = Игра)
 
-    // Интерфейс шины Z80 (ZX Spectrum)
-    input  wire [15:0] Z80_A,
-    inout  wire [7:0]  D_33V,     // Общая шина данных (двунаправленная)
-    input  wire        Z80_MREQ_N,
-    input  wire        Z80_RD_N,
-    input  wire        Z80_WR_N,
-    input  wire        Z80_RFSH_N,
-    output wire        Z80_ROMCS_N,
+    // SPI-интерфейс связи с Raspberry Pi Pico (A1)
+    input  wire        spi_cs_n,     // PIN_48 (/SPI_CS)
+    input  wire        spi_sck,      // PIN_49 (/SPI_SCK)
+    input  wire        spi_mosi,     // PIN_50 (/SPI_MOSI)
+    output wire        spi_miso,     // PIN_47 (/SPI_MISO)
 
-    // Управление буферами (74LVC245)
-    output wire        BUF_DIR,
-    output wire        BUF_OE_N,
+    // Шина адреса и сигналы управления от приставки «Эльф» (через U2, U3, U4)
+    input  wire [13:0] z80_a,        // PIN_21..14, 8..3 (A0..A13)
+    input  wire        pbank,        // PIN_28 (/PBANK_33V)
+    input  wire        romc_n,       // PIN_27 (/ROMC_33V)
+    input  wire        z80_rst_n,    // PIN_34 (/Z80_RST_33V)
+    input  wire        z80_mreq_n,   // PIN_97 (/Z80_MREQ)
+    input  wire        z80_wr_n,     // PIN_98 (/Z80_WR)
+    input  wire        z80_rd_n,     // PIN_99 (/Z80_RD)
+    input  wire        z80_rfsh_n,   // PIN_100(/Z80_RFSH)
+    input  wire        z80_iorq_n,   // PIN_1  (/Z80_IORQ)
+    input  wire        z80_m1_n,     // PIN_2  (/Z80_M1)
 
-    // Интерфейс памяти SRAM (AS6C4008)
-    output wire [18:0] SRAM_A,
-    output wire        SRAM_CE_N,
-    output wire        SRAM_OE_N,
-    output wire        SRAM_WE_N,
+    // Внутренняя шина данных 3.3V (общая для U5, U6, U7)
+    inout  wire [7:0]  d_33v,        // PIN_38,37,36,39,40,41,42,43
 
-    // Интерфейс микроконтроллера Raspberry Pi Pico
-    input  wire        MCU_ACTIVE,
-    input  wire        SPI_CS_N,
-    input  wire        SPI_SCK,
-    input  wire        SPI_MOSI
+    // Управление приемопередатчиком U5 (74LVC245)
+    output wire        buf_dir,      // PIN_29 (/BUF_DIR: 0 = B->A в консоль, 1 = A->B в ПЛИС)
+    output wire        buf_oe_n,     // PIN_26 (/BUF_OE)
+
+    // Управление статической памятью SRAM U6 (AS6C4008 512 КБ)
+    output wire [18:0] sram_a,
+    output wire        sram_ce_n,    // PIN_44 (/SRAM_CE)
+    output wire        sram_oe_n,    // PIN_55 (/SRAM_OE)
+    output wire        sram_we_n     // PIN_69 (/SRAM_WE)
 );
 
     // =========================================================================
-    // 1. СИНХРОНИЗАЦИЯ ДОМЕНОВ (Защита от метастабильности)
+    // 1. ЭМУЛЯЦИЯ МАППЕРА «ЭЛЬФА» С ЦИФРОВОЙ RC-ЗАДЕРЖКОЙ ФРОНТА PBANK (~120 нс)
     // =========================================================================
-    // Все внешние сигналы от Pico должны быть привязаны к тактам 50 МГц
-    
-    reg [2:0] sync_mcu_active;
-    reg [2:0] sync_spi_cs;
-    reg [2:0] sync_spi_sck;
-    reg [1:0] sync_spi_mosi;
+    reg [5:0] bank_reg;
+    reg [2:0] pbank_sync;
+    reg [3:0] pbank_delay_cnt;
+    reg       pbank_latched;
 
-    always @(posedge CLK_50MHZ) begin
-        sync_mcu_active <= {sync_mcu_active[1:0], MCU_ACTIVE};
-        sync_spi_cs     <= {sync_spi_cs[1:0], SPI_CS_N};
-        sync_spi_sck    <= {sync_spi_sck[1:0], SPI_SCK};
-        sync_spi_mosi   <= {sync_spi_mosi[0], SPI_MOSI};
-    end
+    always @(posedge clk_50m or negedge z80_rst_n) begin
+        if (!z80_rst_n) begin
+            bank_reg        <= 6'b000000;
+            pbank_sync      <= 3'b000;
+            pbank_delay_cnt <= 4'd0;
+            pbank_latched   <= 1'b0;
+        end else begin
+            pbank_sync <= {pbank_sync[1:0], pbank};
 
-    wire mcu_mode     = sync_mcu_active[2];
-    wire spi_cs       = sync_spi_cs[2];
-    wire spi_sck_rise = (sync_spi_sck[2:1] == 2'b01); // Детектор фронта SCK
-    wire spi_mosi     = sync_spi_mosi[1];
-
-    // =========================================================================
-    // 2. ПРИЕМНИК SPI ОТ PICO (Потоковая загрузка)
-    // =========================================================================
-    // Протокол: Pico опускает CS и отправляет 24 бита стартового адреса. 
-    // Затем отправляет байты данных один за другим. Адрес увеличивается сам!
-    
-    reg [18:0] mcu_addr;
-    reg [7:0]  shift_reg;
-    reg [7:0]  data_latch;
-    reg [1:0]  byte_cnt;
-    reg [2:0]  bit_cnt;
-    reg        receiving_data;
-    reg        mcu_write_req;
-
-    always @(posedge CLK_50MHZ) begin
-        if (spi_cs) begin
-            // Сброс счетчиков при неактивном Chip Select
-            byte_cnt       <= 0;
-            bit_cnt        <= 0;
-            receiving_data <= 0;
-            mcu_write_req  <= 0;
-        end else if (spi_sck_rise) begin
-            bit_cnt <= bit_cnt + 1;
-
-            if (!receiving_data) begin
-                // Принимаем первые 3 байта (24 бита) как стартовый адрес
-                mcu_addr <= {mcu_addr[17:0], spi_mosi};
-                if (bit_cnt == 7) begin
-                    if (byte_cnt == 2) begin
-                        receiving_data <= 1; // Конец адреса, дальше идут данные
-                    end else begin
-                        byte_cnt <= byte_cnt + 1;
-                    end
-                end
-            end else begin
-                // Собираем полезные данные
-                shift_reg <= {shift_reg[6:0], spi_mosi};
-                if (bit_cnt == 7) begin
-                    data_latch    <= {shift_reg[6:0], spi_mosi}; // Фиксируем байт
-                    mcu_write_req <= 1; // Подаем сигнал на запись в SRAM
+            if (!pbank_sync[2]) begin
+                pbank_delay_cnt <= 4'd0;
+                pbank_latched   <= 1'b0;
+            end else if (!pbank_latched) begin
+                if (pbank_delay_cnt == 4'd6) begin
+                    bank_reg      <= d_33v[5:0];
+                    pbank_latched <= 1'b1;
                 end else begin
-                    mcu_write_req <= 0;
+                    pbank_delay_cnt <= pbank_delay_cnt + 4'd1;
                 end
             end
-        end else begin
-             mcu_write_req <= 0;
         end
     end
 
-    // Аппаратный генератор импульса записи в SRAM
-    reg [1:0] sram_we_state;
-    reg       mcu_sram_we;
+    wire cart_read_en = (~romc_n) & (~bank_reg[5]);
+    wire [18:0] game_addr = {bank_reg[4], bank_reg[3:0], z80_a[13:0]};
 
-    always @(posedge CLK_50MHZ) begin
-        if (mcu_mode) begin
-            if (mcu_write_req && sram_we_state == 0) begin
-                mcu_sram_we   <= 1; 
-                sram_we_state <= 1;
-            end else if (sram_we_state == 1) begin
-                sram_we_state <= 2; // Удержание импульса (20 нс)
-            end else if (sram_we_state == 2) begin
-                mcu_sram_we   <= 0;
-                mcu_addr      <= mcu_addr + 1; // Автоинкремент адреса
-                sram_we_state <= 0;
+    // =========================================================================
+    // 2. SPI-МОСТ (0x01 = Запись SRAM, 0x02 = Чтение SRAM, 0x03 = Режим 256К/512К)
+    // =========================================================================
+    reg [2:0] spi_sck_s;
+    reg [1:0] spi_cs_s;
+    reg       spi_mosi_s;
+
+    always @(posedge clk_50m) begin
+        spi_sck_s  <= {spi_sck_s[1:0], spi_sck};
+        spi_cs_s   <= {spi_cs_s[0], spi_cs_n};
+        spi_mosi_s <= spi_mosi;
+    end
+
+    wire sck_rise  = (spi_sck_s[2:1] == 2'b01);
+    wire sck_fall  = (spi_sck_s[2:1] == 2'b10);
+    wire cs_active = ~spi_cs_s[1];
+
+    reg [2:0]  bit_cnt;
+    reg [2:0]  state;
+    reg [7:0]  rx_shift;
+    reg [7:0]  tx_shift;
+    reg [7:0]  cmd_reg;
+    reg [18:0] mcu_addr;
+    reg [7:0]  mcu_data_out;
+    reg        we_pulse;
+    reg [2:0]  we_cnt;
+    reg        mode_256k = 1'b0;
+
+    wire [7:0] rx_next = {rx_shift[6:0], spi_mosi_s};
+
+    always @(posedge clk_50m) begin
+        if (!cs_active) begin
+            bit_cnt  <= 3'd0;
+            state    <= 3'd0;
+            we_pulse <= 1'b0;
+            we_cnt   <= 3'd0;
+        end else begin
+            if (we_pulse) begin
+                if (we_cnt == 3'd3) begin
+                    we_pulse <= 1'b0;
+                    mcu_addr <= mcu_addr + 19'd1;
+                end else begin
+                    we_cnt <= we_cnt + 3'd1;
+                end
             end
-        end else begin
-            sram_we_state <= 0;
-            mcu_sram_we   <= 0;
+
+            if (sck_rise) begin
+                rx_shift <= rx_next;
+                bit_cnt  <= bit_cnt + 3'd1;
+                if (bit_cnt == 3'd7) begin
+                    case (state)
+                        3'd0: begin
+                            cmd_reg <= rx_next;
+                            state   <= 3'd1;
+                        end
+                        3'd1: begin
+                            if (cmd_reg == 8'h03) begin
+                                mode_256k <= rx_next[0];
+                                state     <= 3'd4;
+                            end else begin
+                                mcu_addr[18:16] <= rx_next[2:0];
+                                state           <= 3'd2;
+                            end
+                        end
+                        3'd2: begin
+                            mcu_addr[15:8] <= rx_next;
+                            state          <= 3'd3;
+                        end
+                        3'd3: begin
+                            mcu_addr[7:0]  <= rx_next;
+                            state          <= 3'd4;
+                        end
+                        3'd4: begin
+                            if (cmd_reg == 8'h01) begin
+                                mcu_data_out <= rx_next;
+                                we_pulse     <= 1'b1;
+                                we_cnt       <= 3'd0;
+                            end else if (cmd_reg == 8'h02) begin
+                                mcu_addr     <= mcu_addr + 19'd1;
+                            end
+                        end
+                    endcase
+                end
+            end
+
+            if (sck_fall) begin
+                if (bit_cnt == 3'd0) tx_shift <= d_33v;
+                else                 tx_shift <= {tx_shift[6:0], 1'b0};
+            end
         end
     end
 
+    assign spi_miso = cs_active ? tx_shift[7] : 1'bz;
+
     // =========================================================================
-    // 3. ЛОГИКА ШИНЫ ZX SPECTRUM И МУЛЬТИПЛЕКСИРОВАНИЕ
+    // 3. АРБИТРАЖ ШИНЫ И ОТСЕЧКА ВТОРОЙ ПОЛОВИНЫ ПАМЯТИ В РЕЖИМЕ 256К
     // =========================================================================
-    
-    // Обнаружение обращения к области ПЗУ (0x0000 - 0x3FFF)
-    // Z80 опускает MREQ, A15 и A14 равны 0. RFSH должен быть неактивен (1).
-    wire zx_rom_access = (~Z80_MREQ_N & ~Z80_A[15] & ~Z80_A[14] & Z80_RFSH_N);
+    wire mcu_wr_en = mcu_active && (cmd_reg == 8'h01) && (state == 3'd4);
+    wire mcu_rd_en = mcu_active && (cmd_reg == 8'h02) && (state == 3'd4);
 
-    // Блокируем внутреннее ПЗУ Спектрума во время работы нашего картриджа
-    assign Z80_ROMCS_N = mcu_mode ? 1'b1 : ~zx_rom_access;
+    wire block_upper_256k = mode_256k & bank_reg[4];
+    wire sram_game_read   = cart_read_en & (~block_upper_256k);
+    wire empty_socket_ff  = (~mcu_active) & cart_read_en & block_upper_256k;
 
-    // Управление направлением буфера данных 74LVC245
-    // 0 = Чтение Спектрумом (SRAM -> Z80), 1 = Запись Спектрумом (Z80 -> SRAM)
-    assign BUF_DIR = ~Z80_RD_N ? 1'b0 : 1'b1;
+    assign d_33v     = mcu_wr_en ? mcu_data_out : (empty_socket_ff ? 8'hFF : 8'bz);
+    assign sram_a    = mcu_active ? mcu_addr   : game_addr;
+    assign sram_ce_n = mcu_active ? 1'b0       : ~sram_game_read;
+    assign sram_oe_n = mcu_active ? ~mcu_rd_en : ~sram_game_read;
+    assign sram_we_n = mcu_active ? ~we_pulse  : 1'b1;
 
-    // Буфер включен только когда Z80 активен и обращается к нашей памяти
-    assign BUF_OE_N = mcu_mode ? 1'b1 : ~zx_rom_access;
-
-    // Коммутация адреса памяти
-    assign SRAM_A = mcu_mode ? mcu_addr : {3'b000, Z80_A};
-
-    // Коммутация управления памятью
-    assign SRAM_CE_N = mcu_mode ? spi_cs : Z80_MREQ_N;
-    assign SRAM_OE_N = mcu_mode ? 1'b1   : Z80_RD_N;
-    assign SRAM_WE_N = mcu_mode ? ~mcu_sram_we : Z80_WR_N;
-
-    // Коммутация шины данных
-    // Во время загрузки ПЛИС выдает байт, в режиме игры — ножки переходят в высокоимпедансное состояние (Z)
-    assign D_33V = (mcu_mode && sram_we_state != 0) ? data_latch : 8'hZZ;
+    assign buf_oe_n  = mcu_active   ? 1'b1 : 1'b0;
+    assign buf_dir   = cart_read_en ? 1'b0 : 1'b1;
 
 endmodule
