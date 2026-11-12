@@ -1,0 +1,28 @@
+# KiCad temporary & build files
+*.bak
+*.bck
+*-backups/
+fp-info-cache
+*.dsn
+*.ses
+*.rpt
+*.drl
+*.pos
+
+# Quartus II build artifacts
+cpld_epm240/db/
+cpld_epm240/incremental_db/
+cpld_epm240/output_files/
+cpld_epm240/*.rpt
+cpld_epm240/*.summary
+cpld_epm240/*.done
+cpld_epm240/*.pin
+cpld_epm240/*.qws
+cpld_epm240/*.sof
+cpld_epm240/*.pof
+
+# Pico SDK / CMake build directory
+firmware_pico/build/
+.vscode/
+.idea/
+__pycache__/

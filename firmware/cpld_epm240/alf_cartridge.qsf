@@ -1,0 +1,103 @@
+# =============================================================================
+# alf_cartridge.qsf — пин-ассайнмент EPM240T100 (MAX II) для универсального
+# картриджа «Эльф» (проект alf-scar).
+# Сгенерировано по нетлисту alf-scar.net. Туличейн: Quartus II 13.0sp1.
+# =============================================================================
+
+set_global_assignment -name FAMILY "MAX II"
+set_global_assignment -name DEVICE EPM240T100C5
+set_global_assignment -name TOP_LEVEL_ENTITY alf_cartridge_top
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION 13.0
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name VERILOG_INPUT_VERSION SYSTEMVERILOG_2005
+set_global_assignment -name VHDL_INPUT_VERSION VHDL_2008
+
+# Неиспользуемые пины — как входы с третьим состоянием (не плавают)
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP "ON"
+
+# ---------------------------------------------------------------------------
+# Такт и сигналы от Raspberry Pi Pico
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_12 -to CLK_50MHZ      # GCLK0, от Pico GPIO21
+set_location_assignment PIN_35 -to MCU_ACTIVE     # от Pico GPIO22
+set_location_assignment PIN_48 -to SPI_CS_N       # от Pico GPIO17
+set_location_assignment PIN_47 -to SPI_MISO       # к Pico GPIO16
+set_location_assignment PIN_50 -to SPI_MOSI       # от Pico GPIO19
+set_location_assignment PIN_49 -to SPI_SCK        # от Pico GPIO18
+
+# ---------------------------------------------------------------------------
+# Шина адреса Z80 A0..A13 (входы, 5В->3.3В через 74AHCT541)
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_21 -to Z80_A[0]
+set_location_assignment PIN_20 -to Z80_A[1]
+set_location_assignment PIN_19 -to Z80_A[2]
+set_location_assignment PIN_18 -to Z80_A[3]
+set_location_assignment PIN_17 -to Z80_A[4]
+set_location_assignment PIN_16 -to Z80_A[5]
+set_location_assignment PIN_15 -to Z80_A[6]
+set_location_assignment PIN_14 -to Z80_A[7]
+set_location_assignment PIN_8  -to Z80_A[8]
+set_location_assignment PIN_7  -to Z80_A[9]
+set_location_assignment PIN_6  -to Z80_A[10]
+set_location_assignment PIN_5  -to Z80_A[11]
+set_location_assignment PIN_4  -to Z80_A[12]
+set_location_assignment PIN_3  -to Z80_A[13]
+
+# ---------------------------------------------------------------------------
+# Управляющие сигналы картриджа «Эльф»
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_28 -to Z80_PBANK_N    # строб защёлки банка
+set_location_assignment PIN_27 -to Z80_ROMC_N     # разрешение ПЗУ картриджа
+set_location_assignment PIN_34 -to Z80_RST_N      # сброс (через U4.Y6)
+
+# ---------------------------------------------------------------------------
+# Буфер данных 74AHCT245
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_29 -to BUF_DIR
+set_location_assignment PIN_26 -to BUF_OE_N
+
+# ---------------------------------------------------------------------------
+# Шина данных (двунаправленная) — совпадает с DQ SRAM (идентичная разводка)
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_38 -to D_33V[0]       # DQ0
+set_location_assignment PIN_37 -to D_33V[1]       # DQ1
+set_location_assignment PIN_36 -to D_33V[2]       # DQ2
+set_location_assignment PIN_39 -to D_33V[3]       # DQ3
+set_location_assignment PIN_40 -to D_33V[4]       # DQ4
+set_location_assignment PIN_41 -to D_33V[5]       # DQ5
+set_location_assignment PIN_42 -to D_33V[6]       # DQ6
+set_location_assignment PIN_43 -to D_33V[7]       # DQ7 (пин DEV_OE — как обычный I/O)
+
+# ---------------------------------------------------------------------------
+# SRAM AS6C4008 (512КБ) — адрес разведён «в разнобой» на плате
+# ---------------------------------------------------------------------------
+set_location_assignment PIN_51 -to SRAM_A[0]
+set_location_assignment PIN_52 -to SRAM_A[1]
+set_location_assignment PIN_54 -to SRAM_A[2]
+set_location_assignment PIN_56 -to SRAM_A[3]
+set_location_assignment PIN_58 -to SRAM_A[4]
+set_location_assignment PIN_62 -to SRAM_A[5]
+set_location_assignment PIN_66 -to SRAM_A[6]
+set_location_assignment PIN_68 -to SRAM_A[7]
+set_location_assignment PIN_64 -to SRAM_A[8]
+set_location_assignment PIN_61 -to SRAM_A[9]
+set_location_assignment PIN_53 -to SRAM_A[10]
+set_location_assignment PIN_57 -to SRAM_A[11]
+set_location_assignment PIN_70 -to SRAM_A[12]
+set_location_assignment PIN_67 -to SRAM_A[13]
+set_location_assignment PIN_72 -to SRAM_A[14]
+set_location_assignment PIN_73 -to SRAM_A[15]
+set_location_assignment PIN_74 -to SRAM_A[16]
+set_location_assignment PIN_71 -to SRAM_A[17]
+set_location_assignment PIN_75 -to SRAM_A[18]
+
+set_location_assignment PIN_44 -to SRAM_CE_N     # пин DEV_CLRn — как обычный I/O
+set_location_assignment PIN_55 -to SRAM_OE_N
+set_location_assignment PIN_69 -to SRAM_WE_N
+
+# =============================================================================
+# ВАЖНО: пины DEV_CLRn (44) и DEV_OE (43) используются как обычный I/O.
+# Убедитесь, что в Quartus НЕ включены глобальные функции clear/output-enable
+# (по умолчанию они выключены, если сигналы не используются как глобальные).
+# =============================================================================
